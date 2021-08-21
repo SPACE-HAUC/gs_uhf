@@ -27,6 +27,8 @@
 
 #define UHF_RSSI 0
 
+#define SW_UPD_FN_SIZE 20
+
 /// From SPACE-HAUC/uhf_gst ///
 #define GST_MAX_PAYLOAD_SIZE 56
 #define GST_MAX_PACKET_SIZE 64
@@ -54,6 +56,21 @@ enum GST_ERRORS
 };
 ///////////////////////////////
 
+// Sent between GUI Client and UHF.
+typedef struct __attribute__((packed))
+{
+    // From UHF Only
+    uint32_t current_packet;
+    uint32_t total_packets;
+    uint8_t in_progress;    // Boolean
+    uint8_t finished;       // Boolean
+
+    // To UHF Only
+    uint8_t stage;          // If 1, UHF will look for the file in the frame payload after this struct.
+    uint8_t begin;          // If 1, UHF will begin the software update process.
+    char filename[20];
+} sw_update_info_t;
+
 typedef struct
 {
     // uhf_modem_t modem; // Just an int.
@@ -61,6 +78,12 @@ typedef struct
     NetDataClient *network_data;
     bool uhf_ready;
     uint8_t netstat;
+
+    char directory[20] = "sendables/";
+    char filename[20];
+    bool sw_upd_in_progress;
+    int sw_upd_packet;
+    uint8_t staged;
 } global_data_t;
 
 /**
@@ -189,6 +212,31 @@ ssize_t gs_uhf_read(char *buf, ssize_t buffer_size, int16_t *rssi, bool *gst_don
  * @return ssize_t 
  */
 ssize_t gs_uhf_write(char *buf, ssize_t buffer_size, bool *gst_done);
+
+/**
+ * @brief 
+ * 
+ * @param args 
+ * @return void* 
+ */
+void *gs_sw_send_file_thread(void *args);
+
+/**
+ * @brief 
+ * 
+ * @param filename 
+ * @return ssize_t 
+ */
+ssize_t gs_sw_get_sent_bytes(const char filename[]);
+
+/**
+ * @brief 
+ * 
+ * @param filename 
+ * @param sent_bytes 
+ * @return int 
+ */
+int gs_sw_set_sent_bytes(const char filename[], ssize_t sent_bytes);
 
 // NOTE: Needs to be called every time we want to begin talking to SPACE-HAUC, but haven't had a communication with it for more than a couple minutes.
 // void gs_uhf_enable_pipe(void) __attribute__((alias("si446x_en_pipe")));
