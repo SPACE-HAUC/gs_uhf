@@ -64,5 +64,3 @@ DESKTOP.INI
 # Doxygen #
 ##########################
 docs/latex/*
-
-*.pass

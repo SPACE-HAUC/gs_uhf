@@ -38,19 +38,7 @@ int main(int argc, char **argv)
 
     // Set up global data.
     global_data_t global[1] = {0};
-
-    // Read password from .pass file.
-    char hash_pass[256] = {0};
-    FILE *fp = fopen("auth.pass", "r");
-    if (fp == NULL)
-    {
-        dbprintlf(FATAL "Failed to open auth.pass, does it exist?");
-        return -1;
-    }
-    fgets(hash_pass, sizeof(hash_pass), fp);
-    fclose(fp);
-
-    global->network_data = new NetDataClient(SERVER_IP, NetPort::ROOFUHF, NetVertex::ROOFUHF, SERVER_POLL_RATE, sha1_hash_t(hash_pass, sizeof(hash_pass)));
+    global->network_data = new NetDataClient(NetPort::ROOFUHF, SERVER_POLL_RATE);
     global->network_data->recv_active = true;
 
     // Create Ground Station Network thread IDs.
@@ -105,8 +93,7 @@ int main(int argc, char **argv)
     si446x_sleep();
 
     // Destroy other things.
-    // close(global->network_data->socket);
-    global->network_data->Close();
+    close(global->network_data->socket);
 
     int retval = global->network_data->thread_status;
     delete global->network_data;

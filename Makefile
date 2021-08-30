@@ -1,8 +1,8 @@
 CXX = g++
-CPPOBJS = src/main.o src/gs_uhf.o network/network.o network/sha_digest.o
+CPPOBJS = src/main.o src/gs_uhf.o network/network.o
 COBJS = 
 CXXFLAGS = -I ./include/ -I ./network/ -Wall -pthread -DGSNID=\"roofuhf\"
-EDLDFLAGS := -lsi446x -lpthread -lm -lssl -lcrypto
+EDLDFLAGS := -lsi446x -lpthread -lm
 TARGET = roof_uhf.out
 
 all: $(COBJS) $(CPPOBJS)
