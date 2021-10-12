@@ -46,6 +46,9 @@ void *gs_uhf_rx_thread(void *args)
 
             // TODO: COMMENT OUT FOR DEBUGGING PURPOSES ONLY
 #ifndef UHF_NOT_CONNECTED_DEBUG
+            dbprintlf(GREEN_FG "UHF IS NOW ARMED AND READY");
+            dbprintlf(GREEN_FG "UHF IS NOW ARMED AND READY");
+            dbprintlf(GREEN_FG "UHF IS NOW ARMED AND READY");
             global->uhf_ready = true;
 #endif
         }
@@ -103,6 +106,8 @@ void *gs_uhf_rx_thread(void *args)
 
 void *gs_network_rx_thread(void *args)
 {
+    dbprintlf(GREEN_FG "GS NETWORK RX THREAD STARTING");
+
     global_data_t *global = (global_data_t *)args;
     NetDataClient *network_data = global->network_data;
 
