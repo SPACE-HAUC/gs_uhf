@@ -21,6 +21,8 @@
 #include "meb_debug.hpp"
 #include "sw_update_packdef.h"
 
+bool signal_detected = false;
+
 void *gs_uhf_rx_thread(void *args)
 {
     // TODO: As of right now, there is no way to detect if the UHF Radio crashes, which may require a re-init. In this event, global_data->uhf_ready should be set to false and the radio should be re-init'd. However, this feature doesn't exist in the middleware.
@@ -71,7 +73,7 @@ void *gs_uhf_rx_thread(void *args)
 
         // TODO: COMMENT OUT FOR DEBUGGING PURPOSES ONLY
 #ifndef UHF_NOT_CONNECTED_DEBUG
-        si446x_en_pipe();
+        // si446x_en_pipe();
 #endif
 
         int retval = gs_uhf_read(buffer, sizeof(buffer), UHF_RSSI, &global->uhf_ready);
@@ -251,7 +253,7 @@ void *gs_network_rx_thread(void *args)
                         }
 
                         // Activate pipe mode.
-                        si446x_en_pipe();
+                        // si446x_en_pipe();
 
                         dbprintlf(BLUE_FG "Attempting to transmit %d bytes to SPACE-HAUC.", payload_size);
                         ssize_t retval = gs_uhf_write((char *)payload, payload_size, &global->uhf_ready);
@@ -334,6 +336,7 @@ int gs_uhf_init(void)
     // TODO: COMMENT OUT FOR DEBUGGING PURPOSES ONLY
 #ifndef UHF_NOT_CONNECTED_DEBUG
     si446x_init();
+    si446x_en_pipe(); // enable pipe at init for RX
 #endif
 
     dbprintlf(GREEN_FG "si446x_init() successful!");
@@ -376,6 +379,10 @@ ssize_t gs_uhf_read(char *buf, ssize_t buffer_size, int16_t *rssi, bool *gst_don
     ssize_t retval = 0;
     while (((retval = si446x_read(frame, sizeof(gst_frame_t), rssi)) <= 0) && (!(*gst_done)))
         ;
+    if (retval > 0)
+        signal_detected = true; // send a PIPE before sending anything else
+    else
+        signal_detected = false;
 
     if (retval != sizeof(gst_frame_t))
     {
@@ -430,6 +437,12 @@ ssize_t gs_uhf_write(char *buf, ssize_t buffer_size, bool *gst_done)
     {
         gpioWrite(PIN_TR, GPIO_HIGH);
         usleep(100000); // 100 ms
+        char pipe_mode_cmd[] = "ES+W22000320\r";
+        if (!signal_detected)
+        {
+            retval = si446x_write(pipe_mode_cmd, sizeof(pipe_mode_cmd));
+            usleep(10000);
+        }
         retval = si446x_write(frame, sizeof(gst_frame_t));
         usleep(10000);
         gpioWrite(PIN_TR, GPIO_LOW);
