@@ -1,7 +1,8 @@
+CC = gcc
 CXX = g++
 CPPOBJS = src/main.o src/gs_uhf.o network/network.o
-COBJS = 
-CXXFLAGS = -I ./include/ -I ./network/ -Wall -pthread -DGSNID=\"roofuhf\"
+COBJS = gpiodev/gpiodev.o
+CXXFLAGS = -I ./ -I ./include/ -I ./network/ -Wall -pthread -DGSNID=\"roofuhf\" -Wno-format
 EDLDFLAGS := -lsi446x -lpthread -lm
 TARGET = roof_uhf.out
 
@@ -13,7 +14,7 @@ all: $(COBJS) $(CPPOBJS)
 	$(CXX) $(CXXFLAGS) -o $@ -c $<
 
 %.o: %.c
-	$(CXX) $(CXXFLAGS) -o $@ -c $<
+	$(CC) $(CXXFLAGS) -o $@ -c $<
 
 .PHONY: clean
 

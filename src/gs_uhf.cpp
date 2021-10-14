@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <si446x.h>
+#include "gpiodev/gpiodev.h"
 #include "gs_uhf.hpp"
 #include "meb_debug.hpp"
 #include "sw_update_packdef.h"
@@ -427,7 +428,12 @@ ssize_t gs_uhf_write(char *buf, ssize_t buffer_size, bool *gst_done)
     ssize_t retval = 0;
     while (retval == 0)
     {
+        gpioWrite(PIN_TR, GPIO_HIGH);
+        usleep(100000); // 100 ms
         retval = si446x_write(frame, sizeof(gst_frame_t));
+        usleep(10000);
+        gpioWrite(PIN_TR, GPIO_LOW);
+        usleep(100000); // 100 ms
         if (retval == 0)
         {
             dbprintlf(RED_FG "Sent zero bytes.");

@@ -12,8 +12,15 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <signal.h>
+#include <stdlib.h>
 #include "meb_debug.hpp"
 #include "gs_uhf.hpp"
+#include "gpiodev/gpiodev.h"
+
+void exit_pa_off()
+{
+    gpioWrite(PIN_PA, GPIO_LOW);
+}
 
 int main(int argc, char **argv)
 {
@@ -24,6 +31,36 @@ int main(int argc, char **argv)
     // Allows manual handling of a broken pipe signal using 'if (errno == EPIPE) {...}'.
     // Broken pipe signal will crash the process, and it caused by sending data to a closed socket.
     signal(SIGPIPE, SIG_IGN);
+    atexit(exit_pa_off);
+
+    // Set up TX Preamp and TR Switching
+    gpioSetMode(PIN_PA, GPIO_OUT);
+    gpioWrite(PIN_PA, GPIO_LOW); // Power amplifier powered down
+    gpioSetMode(PIN_TR, GPIO_OUT);
+    gpioWrite(PIN_TR, GPIO_LOW); // TR Pin in RX state
+
+    // Set up PA Biasing
+    char pa_st = system("dc1247a/test_bias.py -r") >> 8; // reset
+    if (pa_st < 0) // error
+    {
+        dbprintlf(FATAL "Could not set PA Bias to -8V, exiting: %d", pa_st);
+        exit(0);
+    }
+    // Turn on PA_VDD
+    gpioWrite(PIN_PA, GPIO_HIGH);
+    sleep(1); // stabilize
+    // Set bias adequately
+    int count = 10;
+    do
+    {
+        pa_st = system("dc1247a/test_bias.py -s -2.85") >> 8; // set bias to -2.85 V
+    } while(pa_st < 0 && count--);
+    if (pa_st < 0)
+    {
+        dbprintlf(FATAL "Could not update bias to -2.85V, exiting: %d", pa_st);
+        exit(0);
+    }
+    dbprintlf(GREEN_FG "TX Preamp setup successful");
 
     // Spawn UHF-RX thread.
     // Spawn Network-RX thread.

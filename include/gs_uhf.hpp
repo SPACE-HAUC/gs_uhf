@@ -25,6 +25,9 @@
 
 #define NACK_NO_UHF 0x756866 // Roof UHF says it cannot access UHF communications.
 
+#define PIN_TR 16 // RPi GPIO bcm23
+#define PIN_PA 18 // RPi GPIO bcm24
+
 #define UHF_RSSI 0
 
 #define SW_UPD_FN_SIZE 20
