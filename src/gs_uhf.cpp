@@ -1,12 +1,12 @@
 /**
  * @file gs_uhf.cpp
  * @author Mit Bailey (mitbailey99@gmail.com)
- * @brief 
+ * @brief
  * @version See Git tags for version information.
  * @date 2021.08.03
- * 
+ *
  * @copyright Copyright (c) 2021
- * 
+ *
  */
 
 #include <stdlib.h>
@@ -167,7 +167,15 @@ void *gs_network_rx_thread(void *args)
                 case NetType::SW_UPDATE:
                 {
                     dbprintlf(BLUE_FG "Received an SW_UPDATE frame!");
-                    sw_update_info_t *info = (sw_update_info_t *) payload;
+                    // Stop the ACS Update Thread
+                    cs_config_uhf_t uhf_conf[1];
+                    global->acs_update_inhibitor = 1;
+                    uhf_conf->inhibit_acs = 1;
+                    NetFrame *acsframe = new NetFrame((unsigned char *)uhf_conf, sizeof(cs_config_uhf_t), NetType::UHF_CONFIG, NetVertex::CLIENT);
+                    acsframe->sendFrame(global->network_data);
+                    delete acsframe;
+                    // Collect info about SW Update
+                    sw_update_info_t *info = (sw_update_info_t *)payload;
 
                     for (int i = 0; i < netframe->getPayloadSize(); i++)
                     {
@@ -228,12 +236,24 @@ void *gs_network_rx_thread(void *args)
                 case NetType::UHF_CONFIG:
                 {
                     dbprintlf(BLUE_FG "Received an UHF CONFIG frame!");
-                    // TODO: Configure yourself.
+                    // TODO: Stop sending ACS packet
+                    cs_config_uhf_t *uhf_conf = (cs_config_uhf_t *)payload;
+                    global->acs_update_inhibitor = uhf_conf->inhibit_acs;
+                    NetFrame *acsframe = new NetFrame((unsigned char *)uhf_conf, sizeof(cs_config_uhf_t), NetType::UHF_CONFIG, NetVertex::CLIENT);
+                    acsframe->sendFrame(global->network_data);
+                    delete acsframe;
                     break;
                 }
                 case NetType::DATA:
                 {
                     dbprintlf(BLUE_FG "Received a DATA frame!");
+                    // Stop the ACS Update Thread
+                    cs_config_uhf_t uhf_conf[1];
+                    global->acs_update_inhibitor = 1;
+                    uhf_conf->inhibit_acs = 1;
+                    NetFrame *acsframe = new NetFrame((unsigned char *)uhf_conf, sizeof(cs_config_uhf_t), NetType::UHF_CONFIG, NetVertex::CLIENT);
+                    acsframe->sendFrame(global->network_data);
+                    delete acsframe;
 
                     if (global->uhf_ready)
                     {
@@ -252,12 +272,11 @@ void *gs_network_rx_thread(void *args)
                             // TODO: DO we let the client know this failed?
                         }
 
-                        // Activate pipe mode.
-                        // si446x_en_pipe();
-
                         dbprintlf(BLUE_FG "Attempting to transmit %d bytes to SPACE-HAUC.", payload_size);
+                        pthread_mutex_lock(&global->acs_update_lock);
                         ssize_t retval = gs_uhf_write((char *)payload, payload_size, &global->uhf_ready);
                         dbprintlf(BLUE_FG "Transmitted with value: %d (note: this is not the number of bytes sent).", retval);
+                        pthread_mutex_unlock(&global->acs_update_lock);
                     }
                     else
                     {
@@ -271,6 +290,75 @@ void *gs_network_rx_thread(void *args)
                         delete nack_frame;
                     }
                     break;
+                }
+                case NetType::TRACKING_COMMAND:
+                {
+                    dbprintlf(BLUE_FG "Received a TRACKING_COMMAND frame.");
+
+                    // TRACKING_COMMANDs to UHF take the form:
+                    // {0, 0, 0}
+                    // {PREHEAT, COOK, SHUTDOWN}
+                    // {Pass in T-4, In Pass, Pass Over}
+
+                    uint8_t *cmd = payload;
+
+                    if (cmd[0] == 1 && cmd[1] == 0 && cmd[2] == 0)
+                    {
+                        // Pre-Heat, pass in <T-4 minutes.
+                        char res = 0;
+                        // Step 1: Reset the bias controller
+                        while((res = system("biasctrl -r") >> 8) < 0)
+                        {
+                            dbprintlf(RED_FG "Failed to reset: %d", res);
+                            sleep(1);
+                        }
+                        // Step 2: Set the bias to -3.15V
+                        int counter = 60;
+                        while((res = system("biasctrl -s -3.15") >> 8) < 0 && counter--)
+                        {
+                            dbprintlf(RED_FG "Failed to set bias voltage to -3.15: %d", res);
+                            sleep(1);
+                        }
+                        if (counter == 0)
+                        {
+                            dbprintlf(FATAL "Could not set bias voltage, exiting");
+                            exit(1);
+                        }
+                        // Step 3: Turn on the Pre Amp
+                        while (gpioWrite(PIN_PA, GPIO_HIGH) < 0)
+                            usleep(10000);
+                    }
+                    else if (cmd[0] == 0 && cmd[1] == 1 && cmd[2] == 0)
+                    {
+                        // Cook, in pass, send ACS update requests.
+                        global->in_pass = true;
+                        pthread_t acs_tid;
+                        static pthread_attr_t attr;
+                        pthread_attr_init(&attr);
+                        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+                        pthread_create(&acs_tid, &attr, gs_acs_update_thread, global);
+                        pthread_attr_destroy(&attr);
+                    }
+                    else if (cmd[0] == 0 && cmd[1] == 0 && cmd[2] == 1)
+                    {
+                        // Shutdown, pass over.
+                        global->in_pass = false;
+
+                        // Deactivate inhibitor.
+                        if (global->acs_update_inhibitor)
+                        {
+                            global->acs_update_inhibitor = false;
+
+                            cs_config_uhf_t uhf_conf[1] = {0};
+                            uhf_conf->inhibit_acs = 0;
+                            NetFrame *acsframe = new NetFrame((unsigned char *)uhf_conf, sizeof(cs_config_uhf_t), NetType::UHF_CONFIG, NetVertex::ROOFUHF);
+                            delete acsframe;
+                        }
+                    }
+                    else
+                    {
+                        // Error, unknown command, garbage.
+                    }
                 }
                 case NetType::ACK:
                 {
@@ -466,10 +554,10 @@ ssize_t gs_uhf_write(char *buf, ssize_t buffer_size, bool *gst_done)
 #define HASH_SIZE 32
 // TODO: Make this into a thread so that the rest of the program will continue running.
 // NOTE: The RX thread copies all SW-related data into global_data->sw_output and sets the new_sw_data flag.
-void *gs_sw_send_file_thread(void *args) 
+void *gs_sw_send_file_thread(void *args)
 // int sw_gs_send_file(const char directory[], const char filename[], bool *done_upld)
 {
-    global_data_t *global = (global_data_t *) args;
+    global_data_t *global = (global_data_t *)args;
     if (!global->sw_upd_in_progress)
     {
         dbprintlf(RED_FG "global->sw_upd_in_progress == false");
@@ -505,7 +593,7 @@ void *gs_sw_send_file_thread(void *args)
 
     if (bin_fp == NULL)
     {
-        dbprintlf(RED_FG"Could not open %s in directory %s.", global->filename, global->directory);
+        dbprintlf(RED_FG "Could not open %s in directory %s.", global->filename, global->directory);
         // return ERR_BIN_DNE;
         global->sw_upd_in_progress = false;
         return NULL;
@@ -525,7 +613,7 @@ void *gs_sw_send_file_thread(void *args)
 
     if (sent_bytes < 0)
     {
-        dbprintlf(RED_FG"Fatal error retrieving bytes sent for file named %s.", global->filename);
+        dbprintlf(RED_FG "Fatal error retrieving bytes sent for file named %s.", global->filename);
         // return -1;
         global->sw_upd_in_progress = false;
         return NULL;
@@ -569,7 +657,7 @@ void *gs_sw_send_file_thread(void *args)
         update_netframe->sendFrame(global->network_data);
         delete update_netframe;
 
-        dbprintlf(RED_FG"Sent_bytes: %d, sent_packets: %d", sent_bytes, sent_packets);
+        dbprintlf(RED_FG "Sent_bytes: %d, sent_packets: %d", sent_bytes, sent_packets);
 
         ssize_t in_sz = 0;
 
@@ -610,7 +698,7 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (retval <= 0)
                 {
-                    dbprintlf(RED_FG"START/RESUME primer writing failed with value %d.", retval);
+                    dbprintlf(RED_FG "START/RESUME primer writing failed with value %d.", retval);
                     continue;
                 }
 
@@ -623,7 +711,7 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (retval < 0)
                 {
-                    dbprintlf(YELLOW_FG"START/RESUME reply reading failed with value %d.", retval);
+                    dbprintlf(YELLOW_FG "START/RESUME reply reading failed with value %d.", retval);
 
                     // Ask for a repeat.
                     // retval = gst_write(rept_cmd, sizeof(rept_cmd));
@@ -631,7 +719,7 @@ void *gs_sw_send_file_thread(void *args)
 
                     if (retval <= 0)
                     {
-                        dbprintlf(RED_FG"REPT command writing failed with value %d.", retval);
+                        dbprintlf(RED_FG "REPT command writing failed with value %d.", retval);
                     }
                     else
                     {
@@ -642,7 +730,7 @@ void *gs_sw_send_file_thread(void *args)
                 }
                 else if (retval == 0)
                 {
-                    dbprintlf(RED_FG"START/RESUME reply reading timed out with value %d.", retval);
+                    dbprintlf(RED_FG "START/RESUME reply reading timed out with value %d.", retval);
                     continue;
                 }
 
@@ -650,12 +738,12 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (fail_times_sr > 0)
                 {
-                    dbprintlf(YELLOW_FG"Flipping byte %d from 0x%02hhx to 0x%02hhx.", flip_byte_sr, rd_buf[flip_byte_sr], ~rd_buf[flip_byte_sr]);
+                    dbprintlf(YELLOW_FG "Flipping byte %d from 0x%02hhx to 0x%02hhx.", flip_byte_sr, rd_buf[flip_byte_sr], ~rd_buf[flip_byte_sr]);
                     rd_buf[flip_byte_sr] = ~rd_buf[flip_byte_sr];
 
                     fail_times_sr--;
 
-                    dbprintlf(YELLOW_FG"Error induced. Press Enter to continue...");
+                    dbprintlf(YELLOW_FG "Error induced. Press Enter to continue...");
                     getchar();
                 }
 
@@ -664,7 +752,7 @@ void *gs_sw_send_file_thread(void *args)
                 // Check if we read in a repeat command.
                 if (!memcmp(rept_cmd, rd_buf, 5))
                 { // We read in a REPT command, so, repeat last.
-                    dbprintlf(YELLOW_FG"Repeat of previously sent transmission requested. Restarting previous send...");
+                    dbprintlf(YELLOW_FG "Repeat of previously sent transmission requested. Restarting previous send...");
 
 #ifdef DEBUG_MODE_ACTIVE_GS
                     dbprintlf("Press enter to continue...");
@@ -681,7 +769,7 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (sr_rep->cmd != SW_UPD_SRID)
                 {
-                    dbprintlf(YELLOW_FG"The CMD value 0x%02x is invalid. Resending START/RESUME primer.", sr_rep->cmd);
+                    dbprintlf(YELLOW_FG "The CMD value 0x%02x is invalid. Resending START/RESUME primer.", sr_rep->cmd);
 
 #ifdef DEBUG_MODE_ACTIVE_GS
                     dbprintlf("Press enter to continue...");
@@ -692,7 +780,7 @@ void *gs_sw_send_file_thread(void *args)
                 }
                 else if (memcmp((char *)sr_rep->filename, global->filename, fn_sz) != 0)
                 {
-                    dbprintlf(YELLOW_FG"The received filename (%s) does not match what was expected (%s). Resending START/RESUME primer.", sr_rep->filename, global->filename);
+                    dbprintlf(YELLOW_FG "The received filename (%s) does not match what was expected (%s). Resending START/RESUME primer.", sr_rep->filename, global->filename);
 
 #ifdef DEBUG_MODE_ACTIVE_GS
                     dbprintlf("Press enter to continue...");
@@ -703,7 +791,7 @@ void *gs_sw_send_file_thread(void *args)
                 }
                 else if (sr_rep->recv_bytes != sent_bytes)
                 {
-                    dbprintlf(YELLOW_FG"SPACE-HAUC and the Ground Station disagree on the number of bytes transfered (%d vs. %ld). Setting the Ground Station's value of sent bytes (local and file) and sent packets number to match SPACE-HAUC's and resending START/RESUME primer.", sr_rep->recv_bytes, sent_bytes);
+                    dbprintlf(YELLOW_FG "SPACE-HAUC and the Ground Station disagree on the number of bytes transfered (%d vs. %ld). Setting the Ground Station's value of sent bytes (local and file) and sent packets number to match SPACE-HAUC's and resending START/RESUME primer.", sr_rep->recv_bytes, sent_bytes);
 
                     // We should yield to SH here.
 
@@ -711,9 +799,9 @@ void *gs_sw_send_file_thread(void *args)
                     sent_bytes = sr_rep->recv_bytes;
                     sent_packets = (sent_bytes / DATA_SIZE_MAX) + ((sent_bytes % DATA_SIZE_MAX) > 0);
 
-                    dbprintlf(YELLOW_FG"The Ground Station's values are now as follows: %d (local) %d (file).", sent_bytes, gs_sw_get_sent_bytes(global->filename));
-                    dbprintlf(YELLOW_FG"Sent bytes (local / file): %d / %d", sent_bytes, gs_sw_get_sent_bytes(global->filename));
-                    dbprintlf(YELLOW_FG"Sent packets: %d", sent_packets);
+                    dbprintlf(YELLOW_FG "The Ground Station's values are now as follows: %d (local) %d (file).", sent_bytes, gs_sw_get_sent_bytes(global->filename));
+                    dbprintlf(YELLOW_FG "Sent bytes (local / file): %d / %d", sent_bytes, gs_sw_get_sent_bytes(global->filename));
+                    dbprintlf(YELLOW_FG "Sent packets: %d", sent_packets);
 
 #ifdef DEBUG_MODE_ACTIVE_GS
                     dbprintlf("Press enter to continue...");
@@ -729,15 +817,15 @@ void *gs_sw_send_file_thread(void *args)
                     // gs_sw_set_sent_bytes(filename, sent_bytes);
                     // sent_packets++;
 
-                    dbprintlf(YELLOW_FG"The Ground Station's values are now as follows: %d (local) %d (file).", sent_bytes, gs_sw_get_sent_bytes(global->filename));
-                    dbprintlf(YELLOW_FG"Sent bytes (local / file): %d / %d", sent_bytes, gs_sw_get_sent_bytes(global->filename));
-                    dbprintlf(YELLOW_FG"Sent packets: %d", sent_packets);
+                    dbprintlf(YELLOW_FG "The Ground Station's values are now as follows: %d (local) %d (file).", sent_bytes, gs_sw_get_sent_bytes(global->filename));
+                    dbprintlf(YELLOW_FG "Sent bytes (local / file): %d / %d", sent_bytes, gs_sw_get_sent_bytes(global->filename));
+                    dbprintlf(YELLOW_FG "Sent packets: %d", sent_packets);
 
                     continue;
                 }
                 else if (sr_rep->total_packets != max_packets)
                 {
-                    dbprintlf(YELLOW_FG"SPACE-HAUC claims the file will consist of %d packets while the Ground Station claims it will be %d. Resending START/RESUME primer.", sr_rep->total_packets, max_packets);
+                    dbprintlf(YELLOW_FG "SPACE-HAUC claims the file will consist of %d packets while the Ground Station claims it will be %d. Resending START/RESUME primer.", sr_rep->total_packets, max_packets);
 
 #ifdef DEBUG_MODE_ACTIVE_GS
                     dbprintlf("Press enter to continue...");
@@ -780,7 +868,7 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (in_sz <= 0)
                 {
-                    dbprintlf(RED_FG"Reached EOF when retrieving packet %d.", sent_packets);
+                    dbprintlf(RED_FG "Reached EOF when retrieving packet %d.", sent_packets);
                     break;
                 }
 
@@ -806,7 +894,7 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (retval <= 0)
                 {
-                    dbprintlf(RED_FG"DATA packet writing failed with value %d.", retval);
+                    dbprintlf(RED_FG "DATA packet writing failed with value %d.", retval);
                     continue;
                 }
 
@@ -819,7 +907,7 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (retval < 0)
                 {
-                    dbprintlf(YELLOW_FG"DATA reply reading failed with value %d.", retval);
+                    dbprintlf(YELLOW_FG "DATA reply reading failed with value %d.", retval);
 
                     // Ask for a repeat.
                     // retval = gst_write(rept_cmd, sizeof(rept_cmd));
@@ -827,7 +915,7 @@ void *gs_sw_send_file_thread(void *args)
 
                     if (retval <= 0)
                     {
-                        dbprintlf(RED_FG"REPT command writing failed with value %d.", retval);
+                        dbprintlf(RED_FG "REPT command writing failed with value %d.", retval);
                     }
                     else
                     {
@@ -838,7 +926,7 @@ void *gs_sw_send_file_thread(void *args)
                 }
                 else if (retval == 0)
                 {
-                    dbprintlf(RED_FG"DATA reply reading timed out with value %d.", retval);
+                    dbprintlf(RED_FG "DATA reply reading timed out with value %d.", retval);
                     continue;
                 }
 
@@ -846,12 +934,12 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (fail_times_dt > 0)
                 {
-                    dbprintlf(YELLOW_FG"Flipping byte %d from 0x%02hhx to 0x%02hhx.", flip_byte_dt, rd_buf[flip_byte_dt], ~rd_buf[flip_byte_dt]);
+                    dbprintlf(YELLOW_FG "Flipping byte %d from 0x%02hhx to 0x%02hhx.", flip_byte_dt, rd_buf[flip_byte_dt], ~rd_buf[flip_byte_dt]);
                     rd_buf[flip_byte_dt] = ~rd_buf[flip_byte_dt];
 
                     fail_times_dt--;
 
-                    dbprintlf(YELLOW_FG"Error induced. Press Enter to continue...");
+                    dbprintlf(YELLOW_FG "Error induced. Press Enter to continue...");
                     getchar();
                 }
 
@@ -863,7 +951,7 @@ void *gs_sw_send_file_thread(void *args)
                 // Check if we read in a repeat command.
                 if (!memcmp(rept_cmd, rd_buf, 5))
                 { // We read in a REPT command, so, repeat last.
-                    dbprintlf(YELLOW_FG"Repeat of previously sent transmission requested. Restarting previous send...");
+                    dbprintlf(YELLOW_FG "Repeat of previously sent transmission requested. Restarting previous send...");
 
                     continue;
                 }
@@ -875,20 +963,20 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (dt_rep->cmd != SW_UPD_DTID)
                 {
-                    dbprintlf(YELLOW_FG"The CMD value 0x%02x is invalid. Resending DATA packet.", dt_rep->cmd);
+                    dbprintlf(YELLOW_FG "The CMD value 0x%02x is invalid. Resending DATA packet.", dt_rep->cmd);
                     continue;
                 }
                 else if (dt_rep->packet_number != sent_packets)
                 {
-                    dbprintlf(YELLOW_FG"SPACE-HAUC and the Ground Station disagree on the current packet number (%d vs. %d).", dt_rep->packet_number, sent_packets);
+                    dbprintlf(YELLOW_FG "SPACE-HAUC and the Ground Station disagree on the current packet number (%d vs. %d).", dt_rep->packet_number, sent_packets);
 
                     if (dt_rep->received != 1)
                     {
-                        dbprintlf(YELLOW_FG"SPACE-HAUC's replied receive value is %d, indicating a bad receive. The packet it is requesting is number %d (max %d). Switching immediately to START/RESUME mode.", dt_rep->received, dt_rep->packet_number, max_packets);
+                        dbprintlf(YELLOW_FG "SPACE-HAUC's replied receive value is %d, indicating a bad receive. The packet it is requesting is number %d (max %d). Switching immediately to START/RESUME mode.", dt_rep->received, dt_rep->packet_number, max_packets);
                     }
                     else if (dt_rep->received == 1)
                     {
-                        dbprintlf(RED_FG"SPACE-HAUC's replied receive value is %d, indicating a good receive, however the packet it is replying with (number %d) does not agree with the Ground Station (number %d). This may be fatal. Switching immediately to START/RESUME primer mode.", dt_rep->received, dt_rep->packet_number, sent_packets);
+                        dbprintlf(RED_FG "SPACE-HAUC's replied receive value is %d, indicating a good receive, however the packet it is replying with (number %d) does not agree with the Ground Station (number %d). This may be fatal. Switching immediately to START/RESUME primer mode.", dt_rep->received, dt_rep->packet_number, sent_packets);
                     }
 
                     mode = primer;
@@ -896,15 +984,15 @@ void *gs_sw_send_file_thread(void *args)
                 }
                 else if (dt_rep->total_packets != max_packets)
                 {
-                    dbprintlf(YELLOW_FG"SPACE-HAUC has calculated the file's maximum packet value to %d, as opposed to the Ground Station's %d. Resending DATA packet.", dt_rep->total_packets, max_packets);
+                    dbprintlf(YELLOW_FG "SPACE-HAUC has calculated the file's maximum packet value to %d, as opposed to the Ground Station's %d. Resending DATA packet.", dt_rep->total_packets, max_packets);
                     continue;
                 }
                 else
                 {
-                    dbprintlf(RED_FG"Before: sent_bytes = %d, data_size = %d", sent_bytes, dt_hdr->data_size);
+                    dbprintlf(RED_FG "Before: sent_bytes = %d, data_size = %d", sent_bytes, dt_hdr->data_size);
                     sent_bytes += dt_hdr->data_size;
                     gs_sw_set_sent_bytes(global->filename, sent_bytes);
-                    dbprintlf(RED_FG"After: sent_bytes = %d, data_size = %d", sent_bytes, dt_hdr->data_size);
+                    dbprintlf(RED_FG "After: sent_bytes = %d, data_size = %d", sent_bytes, dt_hdr->data_size);
                     sent_packets++;
 
                     if (sent_bytes >= file_size)
@@ -934,12 +1022,12 @@ void *gs_sw_send_file_thread(void *args)
             else if (done_upld)
             {
                 // Interrupted
-                dbprintlf(YELLOW_FG"File transfer interrupted with %ld/%ld bytes of %s having been successfully sent and confirmed per packet.", sent_bytes, file_size, global->filename);
+                dbprintlf(YELLOW_FG "File transfer interrupted with %ld/%ld bytes of %s having been successfully sent and confirmed per packet.", sent_bytes, file_size, global->filename);
             }
             else if (sent_bytes <= 0)
             {
                 // Error
-                dbprintlf(RED_FG"An error has been encountered with %ld/%ld bytes of %s sent.", sent_bytes, file_size, global->filename);
+                dbprintlf(RED_FG "An error has been encountered with %ld/%ld bytes of %s sent.", sent_bytes, file_size, global->filename);
 
                 // return sent_bytes;
                 global->sw_upd_in_progress = false;
@@ -949,7 +1037,7 @@ void *gs_sw_send_file_thread(void *args)
             {
                 /// NOTE: Will reach this case if (recv_bytes != file_size).
                 // ???
-                dbprintlf(RED_FG"Confused.");
+                dbprintlf(RED_FG "Confused.");
 
                 // return ERR_CONFUSED;
                 global->sw_upd_in_progress = false;
@@ -994,7 +1082,7 @@ void *gs_sw_send_file_thread(void *args)
 
             if (retval <= 0)
             {
-                dbprintlf(RED_FG"CONF header writing failed with value %d.", retval);
+                dbprintlf(RED_FG "CONF header writing failed with value %d.", retval);
                 continue;
             }
 
@@ -1007,7 +1095,7 @@ void *gs_sw_send_file_thread(void *args)
 
             if (retval < 0)
             {
-                dbprintlf(YELLOW_FG"CONF reply reading failed with value %d.", retval);
+                dbprintlf(YELLOW_FG "CONF reply reading failed with value %d.", retval);
 
                 // Ask for a repeat.
                 // retval = gst_write(rept_cmd, sizeof(rept_cmd));
@@ -1015,7 +1103,7 @@ void *gs_sw_send_file_thread(void *args)
 
                 if (retval <= 0)
                 {
-                    dbprintlf(RED_FG"REPT command writing failed with value %d.", retval);
+                    dbprintlf(RED_FG "REPT command writing failed with value %d.", retval);
                 }
                 else
                 {
@@ -1026,7 +1114,7 @@ void *gs_sw_send_file_thread(void *args)
             }
             else if (retval == 0)
             {
-                dbprintlf(RED_FG"CONF reply reading timed out with value %d.", retval);
+                dbprintlf(RED_FG "CONF reply reading timed out with value %d.", retval);
                 continue;
             }
 
@@ -1034,12 +1122,12 @@ void *gs_sw_send_file_thread(void *args)
 
             if (fail_times_cf > 0)
             {
-                dbprintlf(YELLOW_FG"Flipping byte %d from 0x%02hhx to 0x%02hhx.", flip_byte_cf, rd_buf[flip_byte_cf], ~rd_buf[flip_byte_cf]);
+                dbprintlf(YELLOW_FG "Flipping byte %d from 0x%02hhx to 0x%02hhx.", flip_byte_cf, rd_buf[flip_byte_cf], ~rd_buf[flip_byte_cf]);
                 rd_buf[flip_byte_cf] = ~rd_buf[flip_byte_cf];
 
                 fail_times_cf--;
 
-                dbprintlf(YELLOW_FG"Error induced. Press Enter to continue...");
+                dbprintlf(YELLOW_FG "Error induced. Press Enter to continue...");
                 getchar();
             }
 
@@ -1048,7 +1136,7 @@ void *gs_sw_send_file_thread(void *args)
             // Check if we read in a repeat command.
             if (!memcmp(rept_cmd, rd_buf, 5))
             { // We read in a REPT command, so, repeat last.
-                dbprintlf(YELLOW_FG"Repeat of previously sent transmission requested. Restarting previous send...");
+                dbprintlf(YELLOW_FG "Repeat of previously sent transmission requested. Restarting previous send...");
 
                 continue;
             }
@@ -1064,30 +1152,30 @@ void *gs_sw_send_file_thread(void *args)
             /// >=0: Requesting packet.
             if (cf_rep->cmd != SW_UPD_CFID)
             {
-                dbprintlf(YELLOW_FG"The CMD value 0x%02x is invalid. Resending CONF header.", cf_rep->cmd);
+                dbprintlf(YELLOW_FG "The CMD value 0x%02x is invalid. Resending CONF header.", cf_rep->cmd);
                 break;
             }
             else if (cf_rep->total_packets != max_packets)
             {
-                dbprintlf(YELLOW_FG"SPACE-HAUC has calculated the file's maximum packet value to %d, as opposed to the Ground Station's %d. Resending CONF header.", cf_rep->total_packets, max_packets);
+                dbprintlf(YELLOW_FG "SPACE-HAUC has calculated the file's maximum packet value to %d, as opposed to the Ground Station's %d. Resending CONF header.", cf_rep->total_packets, max_packets);
                 break;
             }
             else if (cf_rep->request_packet == REQ_PKT_RESEND)
             {
-                dbprintlf(YELLOW_FG"SPACE-HAUC is requesting a re-send of the CONF header. Resending CONF header.");
+                dbprintlf(YELLOW_FG "SPACE-HAUC is requesting a re-send of the CONF header. Resending CONF header.");
                 break;
             }
             else if (cf_rep->request_packet >= 0)
             {
-                dbprintlf(YELLOW_FG"SPACE-HAUC is requesting a file re-send starting with packet %d.", cf_rep->request_packet);
+                dbprintlf(YELLOW_FG "SPACE-HAUC is requesting a file re-send starting with packet %d.", cf_rep->request_packet);
                 if (cf_rep->request_packet > max_packets)
                 {
-                    dbprintlf(RED_FG"SPACE-HAUC's file re-send request has been evaluated to be UNREASONABLE. Resending CONF header.");
+                    dbprintlf(RED_FG "SPACE-HAUC's file re-send request has been evaluated to be UNREASONABLE. Resending CONF header.");
                     break;
                 }
                 else if (cf_rep->request_packet <= max_packets)
                 {
-                    dbprintlf(YELLOW_FG"SPACE-HAUC's file re-send request has been evaluated to be REASONABLE. Sending a RESUME primer for packet %d.", cf_rep->request_packet);
+                    dbprintlf(YELLOW_FG "SPACE-HAUC's file re-send request has been evaluated to be REASONABLE. Sending a RESUME primer for packet %d.", cf_rep->request_packet);
                     sent_packets = cf_rep->request_packet;
                     sent_bytes = DATA_SIZE_MAX * sent_packets;
                     gs_sw_set_sent_bytes(global->filename, sent_bytes);
@@ -1097,20 +1185,20 @@ void *gs_sw_send_file_thread(void *args)
             }
             else if (memcmp(cf_rep->hash, cf_hdr->hash, HASH_SIZE) != 0)
             {
-                dbprintlf(YELLOW_FG"SPACE-HAUC has calculated a hash value for %s which differs from the Ground Station's.", global->filename);
-                dbprintlf(YELLOW_FG"SPACE-HAUC: ");
+                dbprintlf(YELLOW_FG "SPACE-HAUC has calculated a hash value for %s which differs from the Ground Station's.", global->filename);
+                dbprintlf(YELLOW_FG "SPACE-HAUC: ");
                 for (int i = 0; i < HASH_SIZE; i++)
                 {
-                    dbprintf(YELLOW_FG"%02x", *((unsigned char *)cf_rep->hash + i));
+                    dbprintf(YELLOW_FG "%02x", *((unsigned char *)cf_rep->hash + i));
                 }
                 printf("\n");
-                dbprintlf(YELLOW_FG"Ground Station: ");
+                dbprintlf(YELLOW_FG "Ground Station: ");
                 for (int i = 0; i < HASH_SIZE; i++)
                 {
-                    dbprintf(YELLOW_FG"%02x", *((unsigned char *)cf_hdr->hash + i));
+                    dbprintf(YELLOW_FG "%02x", *((unsigned char *)cf_hdr->hash + i));
                 }
                 printf("\n");
-                dbprintlf(YELLOW_FG"Restarting file transfer.");
+                dbprintlf(YELLOW_FG "Restarting file transfer.");
                 sent_packets = 0;
                 sent_bytes = 0;
                 gs_sw_set_sent_bytes(global->filename, 0);
@@ -1127,7 +1215,7 @@ void *gs_sw_send_file_thread(void *args)
 
         case finish:
         {
-            dbprintlf(RED_FG"The Ground Station has finished the file transfer. You shouldn't be here. Confused.");
+            dbprintlf(RED_FG "The Ground Station has finished the file transfer. You shouldn't be here. Confused.");
             break;
         }
         }
@@ -1138,7 +1226,7 @@ void *gs_sw_send_file_thread(void *args)
 
     // return 1;
     global->sw_upd_in_progress = false;
-    
+
     // Send a netframe notifying the GUI client of our finished status.
     info->in_progress = 0;
     info->finished = 1;
@@ -1220,4 +1308,44 @@ int gs_sw_set_sent_bytes(const char filename[], ssize_t sent_bytes)
 
     sync();
     return 1;
+}
+
+void *gs_acs_update_thread(void *global_data_vp)
+{
+    global_data_t *global = (global_data_t *)global_data_vp;
+
+    cmd_input_t acs_cmd[1] = {0};
+
+#define ACS_UPD_ID 14
+    acs_cmd->mod = ACS_UPD_ID;
+    acs_cmd->unused = 0x0;
+    acs_cmd->data_size = 0x0;
+
+    pthread_mutex_lock(&global->acs_update_lock);
+
+    while (global->in_pass && (!global->acs_update_inhibitor))
+    {
+        if (global->uhf_ready)
+        {
+            si446x_info_t si_info[1];
+            si_info->part = 0;
+            si446x_getInfo(si_info);
+            if ((si_info->part & 0x4460) != 0x4460)
+            {
+                dbprintlf(RED_FG "UHF Radio not available");
+            }
+
+            dbprintlf(BLUE_FG "Transmitting ACS packet request to SPACE HAUC.");
+            ssize_t retval = gs_uhf_write((char *)acs_cmd, sizeof(cmd_input_t), &global->uhf_ready);
+        }
+        else
+        {
+            dbprintlf(RED_FG "Cannot send ACS packet request, UHF radio is not ready.");
+        }
+        usleep(0.5 SEC);
+    }
+
+    pthread_mutex_unlock(&global->acs_update_lock);
+
+    return NULL;
 }

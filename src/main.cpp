@@ -75,6 +75,7 @@ int main(int argc, char **argv)
 
     // Set up global data.
     global_data_t global[1] = {0};
+    global->acs_update_lock = PTHREAD_MUTEX_INITIALIZER;
     global->network_data = new NetDataClient(NetPort::ROOFUHF, SERVER_POLL_RATE);
     global->network_data->recv_active = true;
 

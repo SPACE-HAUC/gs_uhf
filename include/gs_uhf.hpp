@@ -59,6 +59,11 @@ enum GST_ERRORS
 };
 ///////////////////////////////
 
+typedef struct
+{
+    uint8_t inhibit_acs;
+} cs_config_uhf_t;
+
 // Sent between GUI Client and UHF.
 typedef struct __attribute__((packed))
 {
@@ -87,6 +92,13 @@ typedef struct
     bool sw_upd_in_progress;
     int sw_upd_packet;
     uint8_t staged;
+
+    // ACS update requests should be sent automatically during the pass unless the client enables the inhibitor. If the 
+    // inhibitor is enabled, it will be re-enabled at the start of the next pass. 
+    bool acs_update_inhibitor;
+    bool in_pass;
+
+    pthread_mutex_t acs_update_lock;
 } global_data_t;
 
 /**
@@ -245,5 +257,7 @@ int gs_sw_set_sent_bytes(const char filename[], ssize_t sent_bytes);
 // void gs_uhf_enable_pipe(void) __attribute__((alias("si446x_en_pipe")));
 
 // TODO: Add new stuff to Makefile so its not undefined reference.
+
+void *gs_acs_update_thread(void *global_data_vp);
 
 #endif // GS_UHF_HPP
